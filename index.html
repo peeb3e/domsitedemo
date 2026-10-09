@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ddonut</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600&family=Nunito+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: #fff;
+    overflow: hidden;
+  }
+
+  /* Full-screen layer for the falling donuts. Never blocks clicks; the
+     mouse is tracked from the window instead. */
+  #falling-layer {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* Only transform + opacity are written per frame (compositor-only),
+     so there's no layout or paint work however many donuts exist. */
+  .falling-item {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: auto;
+    opacity: 0;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+  }
+
+  /* ---------- Floating sketchbook ---------- */
+  #book {
+    position: fixed; top: 50%; left: 50%; z-index: 10000;
+    display: flex; flex-direction: column;
+    width: min(92vw, 480px); height: 280px;
+    transform: translate(-50%, -50%) rotate(-0.8deg);
+    background: repeating-linear-gradient(#fff 0 31px, #e6e6ff 31px 32px);
+    color: #111;
+    border: 3px solid #111;
+    border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+    box-shadow: 6px 8px 0 rgba(0, 0, 0, .15);
+    overflow: hidden;
+    font-family: 'Nunito Sans', sans-serif;
+    transition: width .4s ease-out, height .4s ease-out, transform .4s ease-out;
+  }
+  #book:not([data-page="home"]) {
+    width: min(92vw, 860px); height: min(82vh, 560px);
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  #book.fit { max-width: 96vw; max-height: 96vh; }
+
+  #book nav {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+    padding: 16px 16px 10px;
+    border-bottom: 3px dashed #111;
+    background: #fff;
+  }
+  #book.fit nav { flex-wrap: nowrap; overflow-x: auto; }
+  #book.fit nav button { flex: none; }
+  #book.fit nav button:first-child { margin-left: auto; }
+  #book.fit nav button:last-child { margin-right: auto; }
+
+  /* Buttons share one hand-drawn border shape */
+  #book nav button, .card, .vclose {
+    border: 3px solid #111;
+    border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+    cursor: pointer;
+  }
+  #book nav button { font: 500 13px 'Fredoka', sans-serif; background: #fff; color: #111; padding: 4px 12px; }
+  #book nav button:hover { background: #ffd3f5; }
+  #book nav button.on { background: #f522cf; color: #fff; }
+
+  #stage { position: relative; flex: 1; min-height: 0; }
+
+  /* Scrolling still works (wheel, touch, keys) but the scrollbar is never
+     drawn, so it can't pop in while the book resizes or cards animate. */
+  #page, #book nav { scrollbar-width: none; -ms-overflow-style: none; }
+  #page::-webkit-scrollbar, #book nav::-webkit-scrollbar { display: none; }
+
+  /* While the book is resizing, the page contents stay hidden; they only
+     appear once the resize has fully finished. */
+  #page.wait { visibility: hidden; }
+  #page { height: 100%; overflow: hidden auto; padding: 18px 28px 24px; box-sizing: border-box; }
+  #page h1, #page h2 { font-family: 'Fredoka', sans-serif; font-weight: 600; margin: 0 0 10px; line-height: 1.2; }
+  #page h1 { font-size: 30px; }
+  #page h2 { font-size: 28px; }
+  #page p { margin: 0 0 10px; font-size: 15px; line-height: 32px; }
+  #page a { color: #4800a0; font-weight: 600; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; padding: 4px; }
+
+  .card {
+    --r: -1deg;
+    display: block; width: 100%;
+    font: inherit; font-size: 14px; text-align: left; text-decoration: none;
+    color: #111; background: #fff; padding: 10px;
+    transform: rotate(var(--r));
+    transition: transform .2s;
+    /* goofy pop-in, one card after another, 50ms apart (--n = card index) */
+    animation: goofy .55s cubic-bezier(.8, 1.4, .5, 1) calc(var(--n, 0) * 100ms) backwards;
+  }
+  .card:nth-child(even) { --r: 1.2deg; }
+  .card:hover { transform: scale(1.05) rotate(0); }
+  .card .th { position: relative; aspect-ratio: 16/10; display: grid; place-items: center; background: #dedede; margin-bottom: 6px; font-size: 28px; overflow: hidden; }
+  .card .th img, .card .th video { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+  .card .play { position: absolute; font-size: 30px; color: #fff; text-shadow: 0 0 8px #000; }
+
+  @keyframes goofy {
+    0%   { transform: translateY(24px) scale(0)    rotate(-40deg); }
+    45%  { transform: translateY(-8px) scale(1.25) rotate(9deg); }
+    65%  { transform: translateY(2px)  scale(.88)  rotate(-6deg); }
+    82%  { transform: translateY(-1px) scale(1.07) rotate(3deg); }
+    100% { transform: translateY(0)    scale(1)    rotate(var(--r)); }
+  }
+
+  /* ---------- Media viewer ---------- */
+  #viewer { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 22px 18px; background: #fff; }
+  #viewer[hidden] { display: none; }
+  /* The viewer's contents wait until the book has finished fitting itself
+     to the media, then pop in. */
+  #viewer.wait > * { visibility: hidden; }
+  #viewer:not(.wait) > * { animation: vpop .3s ease; }
+  @keyframes vpop { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .vbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .vbar h2 { margin: 0; font: 600 24px 'Fredoka', sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vclose { font: 500 14px 'Fredoka', sans-serif; background: #f522cf; color: #fff; padding: 4px 12px; }
+  .vmedia { flex: 1; min-height: 0; display: grid; place-items: center; }
+  .vmedia video, .vmedia img { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; box-sizing: border-box; border: 3px solid #111; background: #000; }
+  .vmedia img { background: #fff; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .card, #viewer:not(.wait) > * { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="falling-layer"></div>
+
+<div id="book" data-page="home">
+  <nav id="nav">
+    <button type="button" data-p="home">home</button>
+    <button type="button" data-p="animations">animations</button>
+    <button type="button" data-p="drawings">drawings</button>
+    <button type="button" data-p="about">about</button>
+    <button type="button" data-p="contact">contact</button>
+  </nav>
+  <div id="stage"><div id="page"></div><div id="viewer" hidden></div></div>
+</div>
+
+<script src="media.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  /* ==================================================================
+   * FALLING DONUTS - tweak freely
+   * ================================================================== */
+  const IMAGE_FILES = [
+    "images/falling/ddonut1.png",
+    "images/falling/ddonut2.png",
+    "images/falling/ddonut3.png",
+    "images/falling/ddonut4.png"
+  ];
+
+  const MIN_SIZE = 80, MAX_SIZE = 120;          // px width
+
+  const BASE_VY_MIN = 55, BASE_VY_MAX = 120;    // px/s natural fall speed range
+  const VY_SPRING = 1.1;                        // how fast vy relaxes back to its base speed
+  const VX_DRAG = 1.6;                          // how fast horizontal drift settles back to 0
+  const SWAY_AMPLITUDE = 0;                     // side-to-side sway while falling (0 = off)
+
+  // The mouse is a solid circle donuts bump into and pick up a bit of its motion from.
+  const MOUSE_COLLISION_RADIUS = 0;             // extra px "size" of the invisible ball your cursor carries
+  const MOUSE_BOUNCE_IMPULSE = 20;              // outward kick (px/s) on contact
+  const MOUSE_VELOCITY_TRANSFER = 0.85;         // how much of the cursor's speed is passed on
+  const MOUSE_VY_TRANSFER_MIX = 0.4;            // vertical transfer is weaker so falling still dominates
+
+  const MIN_SPACING_FACTOR = 0.5;               // multiple of combined radii kept as min gap
+  const SPACING_VERTICAL_MIX = 0.4;             // how much of that separation is vertical
+
+  const MAX_VX = 420, MAX_VY = 460;             // velocity clamp
+
+  // Self-scaling spawning: shorten the gap between spawns while frames are
+  // cheap, lengthen it when they aren't.
+  const SPAWN_MS_START = 220, SPAWN_MS_FLOOR = 140, SPAWN_MS_CEIL = 500;
+  const SPAWN_RAMP_STEP = 6, SPAWN_BACKOFF_STEP = 24;
+  const FRAME_BUDGET_GOOD_MS = 18, FRAME_BUDGET_BAD_MS = 26, FRAME_EMA_ALPHA = 0.08;
+
+  const CELL_SIZE = 80;                         // spatial-grid cell, so spacing only checks neighbours
+  const MAX_ITEMS = 60;                         // hard cap
+
+  /* ------------------------------------------------------------------ */
+
+  const layer = document.getElementById("falling-layer");
+  const rand = (min, max) => Math.random() * (max - min) + min;
+  const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+
+  // Items live in a pool and are recycled, so the DOM node count only ever
+  // grows to the peak concurrency and then stays flat.
+  const pool = [], freeList = [];
+  let activeCount = 0;
+
+  function createItem() {
+    const el = document.createElement("img");
+    el.className = "falling-item";
+    el.alt = "";
+    el.draggable = false;
+    layer.appendChild(el);
+    const item = { id: pool.length, el, active: false, next: null, op: 0,
+      x: 0, y: 0, vx: 0, vy: 0, baseVy: 0, size: 0, rot: 0, spin: 0, swayPhase: 0, swaySpeed: 0 };
+    pool.push(item);
+    return item;
+  }
+
+  // Mouse position + velocity, so a fast swipe hits harder than resting nearby.
+  let mouseX = -9999, mouseY = -9999, prevMouseX = -9999, prevMouseY = -9999;
+  let mouseVX = 0, mouseVY = 0, mouseOnScreen = false;
+  const setPointer = (x, y) => { mouseX = x; mouseY = y; mouseOnScreen = true; };
+  const clearPointer = () => { mouseOnScreen = false; };
+  window.addEventListener("mousemove", e => setPointer(e.clientX, e.clientY), { passive: true });
+  window.addEventListener("touchmove", e => { const t = e.touches[0]; if (t) setPointer(t.clientX, t.clientY); }, { passive: true });
+  window.addEventListener("touchend", clearPointer);
+  document.documentElement.addEventListener("mouseleave", clearPointer);
+
+  let spawnInterval = SPAWN_MS_START, nextSpawnAt = 0, frameEma = 16;
+
+  function trySpawn(now, startY) {
+    const initial = startY !== undefined;
+    if (!initial) {
+      if (now < nextSpawnAt) return;
+      if (activeCount >= MAX_ITEMS) { nextSpawnAt = now + 250; return; }
+    }
+
+    const item = freeList.pop() || createItem();
+    const size = rand(MIN_SIZE, MAX_SIZE);
+    item.x = rand(0, Math.max(0, window.innerWidth - size));
+    item.y = initial ? startY : -size;
+    item.vx = 0;
+    item.vy = item.baseVy = rand(BASE_VY_MIN, BASE_VY_MAX);
+    item.size = size;
+    item.rot = rand(0, 360);
+    item.spin = rand(30, 90) * (Math.random() < 0.5 ? -1 : 1);
+    item.swayPhase = rand(0, Math.PI * 2);
+    item.swaySpeed = rand(0.6, 1.4);
+    item.active = true;
+    activeCount++;
+
+    const img = IMAGE_FILES[(Math.random() * IMAGE_FILES.length) | 0];
+    if (item.el.getAttribute("src") !== img) item.el.src = img;
+    item.el.style.width = size + "px";
+
+    if (!initial) {
+      if (frameEma < FRAME_BUDGET_GOOD_MS) spawnInterval = Math.max(SPAWN_MS_FLOOR, spawnInterval - SPAWN_RAMP_STEP);
+      else if (frameEma > FRAME_BUDGET_BAD_MS) spawnInterval = Math.min(SPAWN_MS_CEIL, spawnInterval + SPAWN_BACKOFF_STEP);
+      nextSpawnAt = now + spawnInterval * rand(0.85, 1.15);
+    }
+  }
+
+  // Buffers reused every frame so the loop allocates nothing.
+  const act = [];
+  const grid = new Map();   // cell key -> first item in that cell (linked via item.next)
+  const cellKey = (item) => (((item.x + item.size / 2) / CELL_SIZE) | 0) * 10000 + (((item.y + item.size / 2) / CELL_SIZE) | 0);
+
+  function update(dt, now) {
+    trySpawn(now);
+
+    if (mouseOnScreen && prevMouseX > -9000) {
+      mouseVX = clamp((mouseX - prevMouseX) / dt, -6000, 6000);
+      mouseVY = clamp((mouseY - prevMouseY) / dt, -6000, 6000);
+    } else {
+      mouseVX = mouseVY = 0;
+    }
+    prevMouseX = mouseOnScreen ? mouseX : -9999;
+    prevMouseY = mouseOnScreen ? mouseY : -9999;
+
+    // --- falling physics ---
+    let n = 0;
+    for (let i = 0; i < pool.length; i++) {
+      const it = pool[i];
+      if (!it.active) continue;
+      act[n++] = it;
+
+      if (SWAY_AMPLITUDE) {
+        it.swayPhase += it.swaySpeed * dt;
+        it.vx += Math.sin(it.swayPhase) * SWAY_AMPLITUDE * dt;
+      }
+      it.vy += (it.baseVy - it.vy) * VY_SPRING * dt;
+      it.vx -= it.vx * VX_DRAG * dt;
+      it.vx = clamp(it.vx, -MAX_VX, MAX_VX);
+      it.vy = clamp(it.vy, -MAX_VY, MAX_VY);
+
+      it.x += it.vx * dt;
+      it.y += it.vy * dt;
+      it.rot += (it.spin + it.vx * 0.5) * dt;
+    }
+
+    // --- spacing: bucket items by cell, then only compare neighbours ---
+    grid.clear();
+    for (let i = 0; i < n; i++) {
+      const it = act[i], k = cellKey(it);
+      it.next = grid.get(k) || null;
+      grid.set(k, it);
+    }
+    for (let i = 0; i < n; i++) {
+      const a = act[i];
+      const acx = ((a.x + a.size / 2) / CELL_SIZE) | 0, acy = ((a.y + a.size / 2) / CELL_SIZE) | 0;
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let b = grid.get((acx + ox) * 10000 + acy + oy); b; b = b.next) {
+            if (b.id <= a.id) continue;   // each pair resolved once
+            let dx = (a.x + a.size / 2) - (b.x + b.size / 2);
+            let dy = (a.y + a.size / 2) - (b.y + b.size / 2);
+            const minDist = (a.size + b.size) / 2 * MIN_SPACING_FACTOR;
+            if (dx >= minDist || dx <= -minDist || dy >= minDist || dy <= -minDist) continue;   // cheap reject
+            let dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist >= minDist) continue;
+            if (dist < 0.001) { dx = rand(-1, 1); dy = rand(-1, 1); dist = 0.001; }
+            const overlap = (minDist - dist) * 0.5, nx = dx / dist, ny = dy / dist;
+            a.x += nx * overlap; a.y += ny * overlap * SPACING_VERTICAL_MIX;
+            b.x -= nx * overlap; b.y -= ny * overlap * SPACING_VERTICAL_MIX;
+          }
+        }
+      }
+    }
+
+    // --- mouse as a solid collider ---
+    if (mouseOnScreen) {
+      for (let i = 0; i < n; i++) {
+        const it = act[i];
+        const dx = it.x + it.size / 2 - mouseX, dy = it.y + it.size / 2 - mouseY;
+        const minDist = it.size / 2 + MOUSE_COLLISION_RADIUS;
+        if (dx * dx + dy * dy >= minDist * minDist) continue;
+        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.001);
+        const nx = dx / dist, ny = dy / dist, overlap = minDist - dist;
+        it.x += nx * overlap;
+        it.y += ny * overlap;
+        it.vx = clamp(it.vx + nx * MOUSE_BOUNCE_IMPULSE + mouseVX * MOUSE_VELOCITY_TRANSFER, -MAX_VX, MAX_VX);
+        it.vy = clamp(it.vy + ny * MOUSE_BOUNCE_IMPULSE * 0.3 + mouseVY * MOUSE_VELOCITY_TRANSFER * MOUSE_VY_TRANSFER_MIX, -MAX_VY, MAX_VY);
+      }
+    }
+
+    // --- write to the DOM, recycle anything that has left the screen ---
+    const height = window.innerHeight;
+    for (let i = 0; i < n; i++) {
+      const it = act[i];
+      if (it.y > height + it.size) {
+        it.active = false;
+        it.el.style.opacity = it.op = 0;
+        freeList.push(it);
+        activeCount--;
+        continue;
+      }
+      const op = it.y < 0 ? clamp((it.y + it.size) / it.size, 0, 1)
+               : it.y > height - 100 ? clamp((height - it.y) / 100, 0, 1) : 1;
+      it.el.style.transform = "translate3d(" + it.x + "px," + it.y + "px,0) rotate(" + it.rot + "deg)";
+      if (op !== it.op) it.el.style.opacity = it.op = op;
+    }
+  }
+
+  // The loop fully stops while paused (e.g. a video is playing) and resumes on demand.
+  let paused = false, running = false, ready = false, lastTime = 0;
+
+  function frame(now) {
+    if (paused) { running = false; return; }
+    const frameMs = now - lastTime;
+    lastTime = now;
+    frameEma += (frameMs - frameEma) * FRAME_EMA_ALPHA;
+    update(Math.min(frameMs / 1000, 0.05), now);   // clamp huge gaps (tab switches, etc.)
+    requestAnimationFrame(frame);
+  }
+
+  function startLoop() {
+    if (running || paused || !ready) return;
+    running = true;
+    lastTime = performance.now();
+    requestAnimationFrame(frame);
+  }
+  function setPaused(v) { paused = v; startLoop(); }
+
+  // Decode first so donuts never pop in blank, then start with a few already falling.
+  Promise.all(IMAGE_FILES.map(f => {
+    const im = new Image(); im.src = f;
+    return (im.decode ? im.decode() : Promise.resolve()).catch(() => {});
+  })).then(() => {
+    for (let i = 0; i < 14; i++) trySpawn(0, rand(0, window.innerHeight * 0.8));
+    ready = true;
+    startLoop();
+  });
+
+
+  /* ==================================================================
+   * SKETCHBOOK UI
+   * ================================================================== */
+
+  /* ---- EDIT YOUR TEXT HERE ---- */
+  const BIO = "random bio ill figure out later";
+  const ABOUT = "random ass shit u gotta put in here dom";
+  const CONTACT = '<a href="https://www.youtube.com/@ddonut-k6z" target="_blank" rel="noopener">youtube.com/@ddonut-k6z</a><br>email goes here';
+  /* Videos and drawings come from the videos/ and drawings/ folders (see media.js). */
+
+  const M = window.MEDIA || {};
+  const toItem = p => ({
+    src: p.split("/").map(encodeURIComponent).join("/"),
+    title: p.split("/").pop().replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ")
+  });
+  const VIDEOS = (M.videos || []).map(toItem);
+  const DRAWINGS = (M.drawings || []).map(toItem);
+  const esc = t => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+  const book = document.getElementById("book");
+  const nav = document.getElementById("nav");
+  const page = document.getElementById("page");
+  const viewer = document.getElementById("viewer");
+  let fitMeta = null;   // natural size of the video/drawing currently open
+
+  // --n is each card's index; CSS turns it into a 50ms-per-card pop-in delay.
+  const card = (k, i, thumb, title) =>
+    `<button type="button" class="card" style="--n:${i}" data-k="${k}" data-i="${i}"><div class="th">${thumb}</div>${esc(title)}</button>`;
+  const grid_ = (list, k, thumb, folder) => list.length
+    ? `<div class="grid">${list.map((it, i) => card(k, i, thumb(it), it.title)).join("")}</div>`
+    : `<p>nothing here yet. drop files into the <b>${folder}</b> folder, then double-click <b>update-media.command</b>.</p>`;
+
+  const views = {
+    home: () => `<h1>hi, i'm ddonut</h1><p>${BIO}</p>`,
+    animations: () => `<h2>animations</h2>` + grid_(VIDEOS, "v",
+      v => `<video data-src="${v.src}#t=0.1" muted playsinline></video><span class="play">&#9654;</span>`, "videos"),
+    drawings: () => `<h2>drawings</h2>` + grid_(DRAWINGS, "d",
+      d => `<img src="${d.src}" loading="lazy" decoding="async" alt="">`, "drawings"),
+    about: () => `<h2>about</h2><p>${ABOUT}</p>`,
+    contact: () => `<h2>contact</h2><p>${CONTACT}</p>`
+  };
+
+  // Video thumbnails only load once their card scrolls into view. One observer, reused.
+  const io = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const v = e.target;
+      v.preload = "metadata";
+      v.src = v.dataset.src;
+      v.removeAttribute("data-src");
+      io.unobserve(v);
+    }
+  }, { root: page, rootMargin: "120px" });
+
+  // Resolves once the book has no resize transition still running. Every
+  // caller below uses this to hold content back until the resize is over.
+  async function settle() {
+    for (let i = 0; i < 5; i++) {
+      void book.offsetWidth;   // flush styles so a just-triggered transition exists
+      const running = book.getAnimations().filter(a => "transitionProperty" in a && a.playState !== "finished");
+      if (!running.length) return;
+      await Promise.allSettled(running.map(a => a.finished));
+    }
+  }
+  let seq = 0;   // bumped on every navigation, so a stale settle() never reveals the wrong thing
+
+  function closeViewer() {
+    if (viewer.hidden) return;
+    const my = ++seq;
+    viewer.hidden = true;
+    viewer.classList.remove("wait");
+    viewer.innerHTML = "";   // emptying it also stops the video
+    setPaused(false);
+    fitMeta = null;
+    book.classList.remove("fit");
+    book.style.width = book.style.height = "";
+    // the book shrinks back; keep the cards hidden until that's done
+    page.classList.add("wait");
+    settle().then(() => { if (my === seq) page.classList.remove("wait"); });
+  }
+
+  // Resize the book to wrap the open video/drawing at its natural aspect ratio.
+  function fitBook() {
+    if (!fitMeta || !fitMeta.w || !fitMeta.h) return;
+    const vm = viewer.querySelector(".vmedia");
+    const cw = book.offsetWidth - vm.offsetWidth, ch = book.offsetHeight - vm.offsetHeight;   // nav, padding, borders
+    const W = window.innerWidth, H = window.innerHeight;
+    const f = fitMeta.w >= fitMeta.h ? (W < 700 ? 0.94 : 0.8) : 0.9;
+    let s = Math.min((W * f - cw) / fitMeta.w, (H * f - ch) / fitMeta.h);
+    if (fitMeta.k === "d") s = Math.min(s, 2);   // don't blow small drawings up too far
+    if (!(s > 0)) return;
+    book.style.width = Math.max(340, Math.round(fitMeta.w * s + cw)) + "px";
+    book.style.height = Math.round(fitMeta.h * s + ch) + "px";
+  }
+  window.addEventListener("resize", fitBook);
+
+  function openViewer(k, i) {
+    const it = (k === "v" ? VIDEOS : DRAWINGS)[i];
+    if (!it) return;
+    const my = ++seq;
+    viewer.classList.add("wait");
+    viewer.innerHTML = `<div class="vbar"><h2>${esc(it.title)}</h2><button type="button" class="vclose">&times; close</button></div>` +
+      `<div class="vmedia">` + (k === "v" ? `<video src="${it.src}" controls preload="auto" playsinline></video>` : `<img src="${it.src}" alt="${esc(it.title)}">`) + `</div>`;
+    viewer.hidden = false;
+    book.classList.add("fit");
+
+    const media = viewer.querySelector("video, img");
+    // Reveal the viewer's contents (and start the video) only once the book
+    // has finished resizing to fit the media.
+    const reveal = () => {
+      if (my !== seq || !viewer.classList.contains("wait")) return;
+      viewer.classList.remove("wait");
+      if (k === "v") media.play().catch(() => {});   // if blocked, the controls are right there
+    };
+    const onSize = () => {
+      fitMeta = { k, w: media.videoWidth || media.naturalWidth, h: media.videoHeight || media.naturalHeight };
+      fitBook();
+      settle().then(reveal);
+    };
+    media.addEventListener(k === "v" ? "loadedmetadata" : "load", onSize);
+    if (media.readyState >= 1 || (media.complete && media.naturalWidth)) onSize();
+    setTimeout(reveal, 4000);   // safety net if the media never reports a size
+
+    if (k === "v") {
+      setPaused(true);   // free up CPU/GPU for smooth playback
+      media.addEventListener("error", () => {
+        viewer.querySelector(".vmedia").innerHTML = "<p>this video can't play in your browser. export it as an mp4 (H.264) and try again.</p>";
+        reveal();
+      });
+    }
+  }
+
+  async function go(p) {
+    closeViewer();
+    const my = ++seq;
+    io.disconnect();
+    book.dataset.page = p;   // starts the book's resize
+    for (const b of nav.children) b.classList.toggle("on", b.dataset.p === p);
+    page.classList.add("wait");
+    page.innerHTML = "";     // nothing is on the page while the book resizes
+    await settle();
+    if (my !== seq) return;  // another click came in while we were waiting
+    // Only now is the content built, so the cards' pop-in starts after the resize ends.
+    page.innerHTML = views[p]();
+    page.classList.remove("wait");
+    page.scrollTop = 0;
+    page.querySelectorAll("video[data-src]").forEach(v => io.observe(v));
+  }
+
+  nav.addEventListener("click", e => { const p = e.target.dataset.p; if (p) go(p); });
+  document.getElementById("stage").addEventListener("click", e => {
+    const c = e.target.closest(".card");
+    if (c) openViewer(c.dataset.k, +c.dataset.i);
+    else if (e.target.closest(".vclose")) closeViewer();
+  });
+  window.addEventListener("keydown", e => { if (e.key === "Escape") { if (!viewer.hidden) closeViewer(); else go("home"); } });
+  go("home");
+})();
+</script>
+</body>
+</html>
